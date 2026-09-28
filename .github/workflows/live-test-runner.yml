@@ -142,13 +142,14 @@ jobs:
       - name: Print the numeric summary
         id: summary
         run: |
-          if [ -f "${{ runner.temp }}/linux-summary.env" ]; then
-            . "${{ runner.temp }}/linux-summary.env"
-            echo "$SUMMARY_TEXT"
-            echo "text=$SUMMARY_TEXT" >> "$GITHUB_OUTPUT"
-          else
-            echo "text=linux: no summary produced (contract script missing or crashed early)" >> "$GITHUB_OUTPUT"
+          f="${{ runner.temp }}/linux-summary.env"
+          text=""
+          if [ -f "$f" ]; then
+            text=$(grep '^SUMMARY_TEXT=' "$f" | head -1 | cut -d= -f2- | tr -d '\r' | sed 's/^"//; s/"$//')
           fi
+          [ -n "$text" ] || text="linux: no summary produced (contract script missing or crashed early)"
+          echo "$text"
+          echo "text=$text" >> "$GITHUB_OUTPUT"
 
       - name: Report the result to the private commit
         if: always()
@@ -289,13 +290,14 @@ jobs:
         id: summary
         shell: bash
         run: |
-          if [ -f "${{ runner.temp }}/windows-summary.env" ]; then
-            . "${{ runner.temp }}/windows-summary.env"
-            echo "$SUMMARY_TEXT"
-            echo "text=$SUMMARY_TEXT" >> "$GITHUB_OUTPUT"
-          else
-            echo "text=windows: no summary produced (contract script missing or crashed early)" >> "$GITHUB_OUTPUT"
+          f="${{ runner.temp }}/windows-summary.env"
+          text=""
+          if [ -f "$f" ]; then
+            text=$(grep '^SUMMARY_TEXT=' "$f" | head -1 | cut -d= -f2- | tr -d '\r' | sed 's/^"//; s/"$//')
           fi
+          [ -n "$text" ] || text="linux: no summary produced (contract script missing or crashed early)"
+          echo "$text"
+          echo "text=$text" >> "$GITHUB_OUTPUT"
 
       - name: Report the result to the private commit
         if: always()
