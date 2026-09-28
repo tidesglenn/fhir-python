@@ -1,0 +1,326 @@
+name: live-test-runner
+
+# Disposable test-runner environment (public repo = free Actions minutes).
+#
+# This repository holds ONLY generic test infrastructure: this workflow,
+# throwaway Oracle Free / SQL Server containers, LocalDB/Express bootstrap,
+# and the reporting helpers under scripts/. No application source lives here.
+#
+# Flow: a private repository (or a human) sends a commit SHA via
+# repository_dispatch / workflow_dispatch. Each job checks the private code
+# out at runtime with the RUNNER_PAT secret, runs that repo's
+# ci/test-runner/<os>-live contract script with ALL output captured to a log
+# file, prints only the numeric pass/fail summary, posts a commit status back
+# to the private repo, and - on failure - posts the captured log there as an
+# issue. Private sources are never printed in these logs, never uploaded as
+# artifacts, and never committed here.
+#
+# Required secrets (see README.md):
+#   RUNNER_PAT    fine-grained PAT: Contents read on the private repo,
+#                 Commit statuses + Issues read/write on it
+#   PRIVATE_REPO  the private repo, owner/name
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Private-repo commit SHA to test"
+        required: true
+  repository_dispatch:
+    types: [run-private-tests]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runner-${{ github.event.client_payload.sha || inputs.sha }}
+  cancel-in-progress: true
+
+env:
+  SHA: ${{ github.event.client_payload.sha || inputs.sha }}
+  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+  # Throwaway credentials for the per-run containers. They protect nothing.
+  ORACLE_APP_USER: WBRUNNER
+  ORACLE_APP_PASSWORD: RunnerOracle_2026
+  SQLSERVER_SA_PASSWORD: RunnerSql_2026x
+  SQLSERVER_ODBC_DRIVER: ODBC Driver 18 for SQL Server
+
+jobs:
+  linux:
+    name: Linux - real Oracle Free + real SQL Server
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+
+    services:
+      oracle:
+        image: gvenzl/oracle-free:23-slim-faststart
+        env:
+          ORACLE_PASSWORD: RunnerOracle_2026
+          APP_USER: WBRUNNER
+          APP_USER_PASSWORD: RunnerOracle_2026
+        ports:
+          - 1521:1521
+        options: >-
+          --health-cmd healthcheck.sh
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 30
+
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: Y
+          MSSQL_PID: Developer
+          MSSQL_SA_PASSWORD: RunnerSql_2026x
+        ports:
+          - 1433:1433
+
+    steps:
+      - name: Check configuration
+        env:
+          RUNNER_PAT: ${{ secrets.RUNNER_PAT }}
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+        run: |
+          [ -n "$SHA" ] || { echo "No SHA to test."; exit 1; }
+          if [ -z "$RUNNER_PAT" ] || [ -z "$PRIVATE_REPO" ]; then
+            echo "Set the RUNNER_PAT and PRIVATE_REPO repository secrets first (see README)."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4   # this infrastructure repo (for scripts/)
+        with:
+          path: infra
+
+      - name: Mark pending on the private commit
+        continue-on-error: true
+        env:
+          RUNNER_PAT: ${{ secrets.RUNNER_PAT }}
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+        run: bash infra/scripts/report-status.sh pending "public-runner / linux" "running"
+
+      - name: Check out the private code under test
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.PRIVATE_REPO }}
+          token: ${{ secrets.RUNNER_PAT }}
+          ref: ${{ env.SHA }}
+          path: private
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Linux and Microsoft ODBC dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y curl ca-certificates libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3 unixodbc unixodbc-dev
+          curl -sSL -o /tmp/packages-microsoft-prod.deb https://packages.microsoft.com/config/ubuntu/24.04/packages-microsoft-prod.deb
+          sudo dpkg -i /tmp/packages-microsoft-prod.deb
+          rm -f /tmp/packages-microsoft-prod.deb
+          sudo apt-get update
+          sudo env ACCEPT_EULA=Y apt-get install -y msodbcsql18
+
+      - name: Run the private repo's linux-live contract (log captured, not printed)
+        id: run
+        env:
+          ORACLE_HOST: localhost
+          ORACLE_PORT: "1521"
+          ORACLE_SERVICE: FREEPDB1
+          SQLSERVER_HOST: localhost,1433
+          RUNNER_LOG: ${{ runner.temp }}/linux-contract.log
+          SUMMARY_ENV: ${{ runner.temp }}/linux-summary.env
+        run: |
+          set +e
+          bash private/ci/test-runner/linux-live.sh > "$RUNNER_LOG" 2>&1
+          code=$?
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "contract exit code: $code (log withheld from public output)"
+          exit 0
+
+      - name: Print the numeric summary
+        id: summary
+        run: |
+          if [ -f "${{ runner.temp }}/linux-summary.env" ]; then
+            . "${{ runner.temp }}/linux-summary.env"
+            echo "$SUMMARY_TEXT"
+            echo "text=$SUMMARY_TEXT" >> "$GITHUB_OUTPUT"
+          else
+            echo "text=linux: no summary produced (contract script missing or crashed early)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Report the result to the private commit
+        if: always()
+        continue-on-error: true
+        env:
+          RUNNER_PAT: ${{ secrets.RUNNER_PAT }}
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+        run: |
+          if [ "${{ steps.run.outputs.code }}" = "0" ]; then
+            bash infra/scripts/report-status.sh success "public-runner / linux" "${{ steps.summary.outputs.text }}"
+          else
+            bash infra/scripts/report-status.sh failure "public-runner / linux" "${{ steps.summary.outputs.text }}"
+          fi
+
+      - name: Post the failure log to the private repo
+        if: always() && steps.run.outputs.code != '0' && steps.run.outputs.code != ''
+        continue-on-error: true
+        env:
+          RUNNER_PAT: ${{ secrets.RUNNER_PAT }}
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+        run: bash infra/scripts/post-failure.sh "${{ runner.temp }}/linux-contract.log" "public-runner / linux failed @ ${SHA:0:8}"
+
+      - name: Enforce the result
+        if: always() && steps.run.outputs.code != ''
+        run: exit ${{ steps.run.outputs.code }}
+
+  windows:
+    name: Windows 2025 - real sqlcmd/bcp + real SQL Server
+    runs-on: windows-2025
+    timeout-minutes: 40
+
+    steps:
+      - name: Check configuration
+        shell: bash
+        env:
+          RUNNER_PAT: ${{ secrets.RUNNER_PAT }}
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+        run: |
+          [ -n "$SHA" ] || { echo "No SHA to test."; exit 1; }
+          if [ -z "$RUNNER_PAT" ] || [ -z "$PRIVATE_REPO" ]; then
+            echo "Set the RUNNER_PAT and PRIVATE_REPO repository secrets first (see README)."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4   # this infrastructure repo (for scripts/)
+        with:
+          path: infra
+
+      - name: Mark pending on the private commit
+        shell: bash
+        continue-on-error: true
+        env:
+          RUNNER_PAT: ${{ secrets.RUNNER_PAT }}
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+        run: bash infra/scripts/report-status.sh pending "public-runner / windows" "running"
+
+      - name: Check out the private code under test
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.PRIVATE_REPO }}
+          token: ${{ secrets.RUNNER_PAT }}
+          ref: ${{ env.SHA }}
+          path: private
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Start SQL Server (LocalDB) and create a scratch database
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          # sqlcmd/bcp normally ship with the runner image. Install only if missing.
+          if (-not (Get-Command sqlcmd -ErrorAction SilentlyContinue) -or
+              -not (Get-Command bcp -ErrorAction SilentlyContinue)) {
+            choco install sqlserver-cmdlineutils -y --no-progress
+            $bcp = Get-ChildItem "C:\Program Files\Microsoft SQL Server" -Recurse -Filter bcp.exe -ErrorAction SilentlyContinue |
+                   Select-Object -First 1
+            if ($bcp) {
+              Add-Content $env:GITHUB_PATH $bcp.DirectoryName
+              $env:PATH = "$($bcp.DirectoryName);$env:PATH"
+            }
+          }
+
+          if (Get-Command sqllocaldb -ErrorAction SilentlyContinue) {
+            sqllocaldb create MSSQLLocalDB 2>$null
+            sqllocaldb start MSSQLLocalDB
+            $server = "(localdb)\MSSQLLocalDB"
+          } else {
+            choco install sql-server-express -y --no-progress
+            Start-Service 'MSSQL$SQLEXPRESS' -ErrorAction SilentlyContinue
+            $server = "localhost\SQLEXPRESS"
+          }
+          Write-Host "SQL Server for this run: $server"
+
+          $ready = $false
+          for ($i = 0; $i -lt 30; $i++) {
+            sqlcmd -S $server -E -b -l 5 -Q "SELECT 1" | Out-Null
+            if ($LASTEXITCODE -eq 0) { $ready = $true; break }
+            Start-Sleep -Seconds 5
+          }
+          if (-not $ready) { throw "SQL Server at $server never answered" }
+
+          $db = "WbPubLive_$([guid]::NewGuid().ToString('N').Substring(0, 10))"
+          sqlcmd -S $server -E -b -l 30 -Q "CREATE DATABASE [$db]"
+          if ($LASTEXITCODE -ne 0) { throw "CREATE DATABASE $db failed" }
+
+          Add-Content $env:GITHUB_ENV "BCP_UI_LIVE_SERVER=$server"
+          Add-Content $env:GITHUB_ENV "BCP_UI_LIVE_DATABASE=$db"
+          Write-Host "Scratch database: $db"
+
+      - name: Run the private repo's windows-live contract (log captured, not printed)
+        id: run
+        shell: bash
+        env:
+          RUNNER_LOG: ${{ runner.temp }}/windows-contract.log
+          SUMMARY_ENV: ${{ runner.temp }}/windows-summary.env
+        run: |
+          set +e
+          pwsh -File private/ci/test-runner/windows-live.ps1 > "$RUNNER_LOG" 2>&1
+          code=$?
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "contract exit code: $code (log withheld from public output)"
+          exit 0
+
+      - name: Drop the scratch database
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:BCP_UI_LIVE_SERVER -and $env:BCP_UI_LIVE_DATABASE) {
+            $db = $env:BCP_UI_LIVE_DATABASE
+            sqlcmd -S $env:BCP_UI_LIVE_SERVER -E -b -l 30 -Q "ALTER DATABASE [$db] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [$db];"
+          }
+
+      - name: Print the numeric summary
+        id: summary
+        shell: bash
+        run: |
+          if [ -f "${{ runner.temp }}/windows-summary.env" ]; then
+            . "${{ runner.temp }}/windows-summary.env"
+            echo "$SUMMARY_TEXT"
+            echo "text=$SUMMARY_TEXT" >> "$GITHUB_OUTPUT"
+          else
+            echo "text=windows: no summary produced (contract script missing or crashed early)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Report the result to the private commit
+        if: always()
+        shell: bash
+        continue-on-error: true
+        env:
+          RUNNER_PAT: ${{ secrets.RUNNER_PAT }}
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+        run: |
+          if [ "${{ steps.run.outputs.code }}" = "0" ]; then
+            bash infra/scripts/report-status.sh success "public-runner / windows" "${{ steps.summary.outputs.text }}"
+          else
+            bash infra/scripts/report-status.sh failure "public-runner / windows" "${{ steps.summary.outputs.text }}"
+          fi
+
+      - name: Post the failure log to the private repo
+        if: always() && steps.run.outputs.code != '0' && steps.run.outputs.code != ''
+        shell: bash
+        continue-on-error: true
+        env:
+          RUNNER_PAT: ${{ secrets.RUNNER_PAT }}
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+        run: bash infra/scripts/post-failure.sh "${{ runner.temp }}/windows-contract.log" "public-runner / windows failed @ ${SHA:0:8}"
+
+      - name: Enforce the result
+        if: always() && steps.run.outputs.code != ''
+        shell: bash
+        run: exit ${{ steps.run.outputs.code }}
