@@ -44,12 +44,15 @@ env:
   ORACLE_APP_PASSWORD: RunnerOracle_2026
   SQLSERVER_SA_PASSWORD: RunnerSql_2026x
   SQLSERVER_ODBC_DRIVER: ODBC Driver 18 for SQL Server
+  # Throwaway credentials for the per-run IRIS container. They protect nothing.
+  IRIS_APP_USER: _SYSTEM
+  IRIS_APP_PASSWORD: RunnerIris_2026
 
 jobs:
   linux:
-    name: Linux - real Oracle Free + real SQL Server
+    name: Linux - real Oracle Free + real IRIS + real SQL Server
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 50
 
     services:
       oracle:
@@ -74,6 +77,20 @@ jobs:
           MSSQL_SA_PASSWORD: RunnerSql_2026x
         ports:
           - 1433:1433
+
+      iris:
+        image: containers.intersystems.com/intersystems/iris-community:2026.1
+        env:
+          IRIS_USERNAME: _SYSTEM
+          IRIS_PASSWORD: RunnerIris_2026
+        ports:
+          - 1972:1972
+        options: >-
+          --name iris
+          --health-cmd "/usr/irissys/dev/Cloud/ICM/waitReady.sh -m 1"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 30
 
     steps:
       - name: Check configuration
@@ -139,6 +156,27 @@ jobs:
           echo "contract exit code: $code (log withheld from public output)"
           exit 0
 
+      - name: Unexpire IRIS container passwords (belt and braces)
+        continue-on-error: true
+        run: docker exec iris iris session iris -U%SYS '##class(Security.Users).UnExpireUserPasswords("*")' || true
+
+      - name: Run the private repo's iris-live contract (log captured, not printed)
+        id: run_iris
+        env:
+          IRIS_HOST: localhost
+          IRIS_PORT: "1972"
+          IRIS_NAMESPACE: USER
+          SQLSERVER_HOST: localhost,1433
+          RUNNER_LOG: ${{ runner.temp }}/iris-contract.log
+          SUMMARY_ENV: ${{ runner.temp }}/iris-summary.env
+        run: |
+          set +e
+          bash private/ci/test-runner/iris-live.sh > "$RUNNER_LOG" 2>&1
+          code=$?
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "iris contract exit code: $code (log withheld from public output)"
+          exit 0
+
       - name: Print the numeric summary
         id: summary
         run: |
@@ -148,6 +186,13 @@ jobs:
             text=$(grep '^SUMMARY_TEXT=' "$f" | head -1 | cut -d= -f2- | tr -d '\r' | sed 's/^"//; s/"$//')
           fi
           [ -n "$text" ] || text="linux: no summary produced (contract script missing or crashed early)"
+          f_iris="${{ runner.temp }}/iris-summary.env"
+          text_iris=""
+          if [ -f "$f_iris" ]; then
+            text_iris=$(grep '^SUMMARY_TEXT=' "$f_iris" | head -1 | cut -d= -f2- | tr -d '\r' | sed 's/^"//; s/"$//')
+          fi
+          [ -n "$text_iris" ] || text_iris="iris: no summary produced (contract script missing or crashed early)"
+          text="$text | $text_iris"
           echo "$text"
           echo "text=$text" >> "$GITHUB_OUTPUT"
 
@@ -158,7 +203,7 @@ jobs:
           RUNNER_PAT: ${{ secrets.RUNNER_PAT }}
           PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
         run: |
-          if [ "${{ steps.run.outputs.code }}" = "0" ]; then
+          if [ "${{ steps.run.outputs.code }}" = "0" ] && [ "${{ steps.run_iris.outputs.code }}" = "0" ]; then
             bash infra/scripts/report-status.sh success "public-runner / linux" "${{ steps.summary.outputs.text }}"
           else
             bash infra/scripts/report-status.sh failure "public-runner / linux" "${{ steps.summary.outputs.text }}"
@@ -172,9 +217,23 @@ jobs:
           PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
         run: bash infra/scripts/post-failure.sh "${{ runner.temp }}/linux-contract.log" "public-runner / linux failed @ ${SHA:0:8}"
 
+      - name: Post the iris failure log to the private repo
+        if: always() && steps.run_iris.outputs.code != '0' && steps.run_iris.outputs.code != ''
+        continue-on-error: true
+        env:
+          RUNNER_PAT: ${{ secrets.RUNNER_PAT }}
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+        run: bash infra/scripts/post-failure.sh "${{ runner.temp }}/iris-contract.log" "public-runner / linux (iris) failed @ ${SHA:0:8}"
+
       - name: Enforce the result
         if: always() && steps.run.outputs.code != ''
-        run: exit ${{ steps.run.outputs.code }}
+        run: |
+          code="${{ steps.run.outputs.code }}"
+          code_iris="${{ steps.run_iris.outputs.code }}"
+          if [ "$code" != "0" ] || { [ -n "$code_iris" ] && [ "$code_iris" != "0" ]; }; then
+            exit 1
+          fi
+          exit 0
 
   windows:
     name: Windows 2025 - real sqlcmd/bcp + real SQL Server
