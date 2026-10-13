@@ -37,14 +37,13 @@ jobs:
           Copy-Item ci-live/m23_diag.py verify/test_zz_m23_diag.py
           $env:M23_DIAG_OUT = Join-Path $R "diag.jsonl"
           $env:QT_QPA_PLATFORM = "offscreen"
-          $env:M23_CASE = "offscreen, after test_monitor_ui"
+          $env:M23_CASE = "offscreen, after test_monitor_ui (fixed)"
           python -m pytest verify/test_monitor_ui.py verify/test_zz_m23_diag.py -q -p no:cacheprovider -rfE *> (Join-Path $R "after-monitor.txt")
-          $env:M23_CASE = "offscreen, alone"
-          python -m pytest verify/test_zz_m23_diag.py -q -p no:cacheprovider *> (Join-Path $R "alone.txt")
-          python -m pytest "verify/test_monitor_ui.py::test_m23_the_connections_split_between_source_and_destination_is_kept" -q -p no:cacheprovider *> (Join-Path $R "m23-alone.txt")
+          python -m pytest verify/test_cache_source.py verify/test_flat_file_source.py -q -p no:cacheprovider -rfE *> (Join-Path $R "alone.txt")
+          python -m pytest "verify/test_monitor_ui.py::test_m23_the_connections_split_between_source_and_destination_is_kept" "verify/test_monitor_ui.py::test_m23b_the_source_side_is_sized_to_the_form_shown" -q -p no:cacheprovider -rfE *> (Join-Path $R "m23-alone.txt")
           $env:QT_QPA_PLATFORM = "windows"
-          $env:M23_CASE = "windows platform, alone"
-          python -m pytest verify/test_zz_m23_diag.py -q -p no:cacheprovider *> (Join-Path $R "windows-platform.txt")
+          $env:M23_CASE = "windows platform (fixed)"
+          python -m pytest verify/test_monitor_ui.py verify/test_zz_m23_diag.py -q -p no:cacheprovider -rfE *> (Join-Path $R "windows-platform.txt")
           "measured (output withheld)"
           exit 0
       - name: File the measurement in the private repository
