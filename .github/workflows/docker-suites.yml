@@ -1,0 +1,129 @@
+name: docker-suites
+
+# Temporary: full live test of one private-repo branch (offline suite + installed copy, IRIS with
+# the runtime, Cache 2018.1), on free public-repo minutes. Same rules as live-test-runner.yml: the
+# private code is checked out at runtime with RUNNER_PAT, every output goes to files, only numeric
+# summaries are printed here, and the details are filed as an issue in the private repository.
+on:
+  push:
+    branches: [claude/pr24-live]
+
+permissions:
+  contents: read
+
+env:
+  PRIVATE_REF: claude/pr24-live-docker
+  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+  QT_QPA_PLATFORM: offscreen
+  BASE_REF: HEAD~1
+
+jobs:
+  suites:
+    name: ${{ matrix.job }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        job: [offline, iris, cache]
+    steps:
+      - name: Check out the private code under test
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.PRIVATE_REPO }}
+          token: ${{ secrets.RUNNER_PAT }}
+          ref: ${{ env.PRIVATE_REF }}
+          path: private
+          fetch-depth: 2
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Linux, Qt and ODBC dependencies (output withheld)
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/results"
+          {
+            sudo apt-get update
+            sudo apt-get install -y curl ca-certificates libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3 unixodbc unixodbc-dev
+            curl -sSL -o /tmp/packages-microsoft-prod.deb https://packages.microsoft.com/config/ubuntu/24.04/packages-microsoft-prod.deb
+            sudo dpkg -i /tmp/packages-microsoft-prod.deb
+            sudo apt-get update
+            sudo env ACCEPT_EULA=Y apt-get install -y msodbcsql18
+            python -m pip install -r private/requirements-dev.txt pytest-timeout intersystems-irispython
+            python -m pip freeze
+          } > "$RUNNER_TEMP/results/deps-setup.log" 2>&1
+          echo "SHA=$(git -C private rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "dependencies installed"
+
+      - name: Run the suites (output withheld)
+        working-directory: private
+        run: |
+          set +e
+          R="$RUNNER_TEMP/results"
+          case "${{ matrix.job }}" in
+            offline)
+              { python install_workbench.py verify --root . --package package/WORKBENCH_V2_PACKAGE.txt
+                python tools/build_package.py --check
+                python install_application.py verify --root . --package package/WORKBENCH_APPLICATION_PACKAGE.txt
+                python tools/build_application_package.py --check; } > "$R/package-checks.log" 2>&1
+              python -m pytest verify IrisWorkbenchUpdate/tests -q -p no:cacheprovider -rfEs --timeout=600 \
+                --junitxml="$R/offline-junit.xml" > "$R/offline.log" 2>&1
+              D="$RUNNER_TEMP/wb install"; M="$RUNNER_TEMP/main docs"; mkdir -p "$M"
+              for f in WORKBENCH_V2_PACKAGE.txt WORKBENCH_V2_INSTALLER.txt; do git show "$BASE_REF:package/$f" > "$M/$f"; done
+              { python "$M/WORKBENCH_V2_INSTALLER.txt" decode "$D" --package "$M/WORKBENCH_V2_PACKAGE.txt"
+                cp package/WORKBENCH_V2_PACKAGE.txt package/WORKBENCH_V2_INSTALLER.txt "$D/"
+                (cd "$D" && python WORKBENCH_V2_INSTALLER.txt install --skip-tests)
+                python ci/test-runner/installed_copy_check.py "$D"; } > "$R/installed-copy.log" 2>&1
+              ;;
+            iris)
+              sudo -E env "PATH=$PATH" RUNTIME_REPO="$PWD/ci-live/runtime" ENV_FILE=/tmp/wb-live.env \
+                bash ci/test-runner/iris-docker-local.sh > "$R/iris-setup.log" 2>&1
+              sudo chmod 644 /tmp/wb-live.env
+              . /tmp/wb-live.env
+              timeout -k 60 6000 python -m pytest verify IrisWorkbenchUpdate/tests -q -p no:cacheprovider -rfEs \
+                --timeout=900 --junitxml="$R/iris-junit.xml" > "$R/iris.log" 2>&1
+              docker logs iris > "$R/docker-iris.txt" 2>&1
+              ;;
+            cache)
+              sudo -E env "PATH=$PATH" ENV_FILE=/tmp/wb-cache.env \
+                bash ci/test-runner/cache-docker-local.sh > "$R/cache-setup.log" 2>&1
+              sudo chmod 644 /tmp/wb-cache.env
+              bash ci-live/cache_compile.sh > "$R/cache-compile.log" 2>&1
+              . /tmp/wb-cache.env
+              python -m pytest -p cache_unixodbc verify/test_truncation_guard.py -q -p no:cacheprovider -rfEs \
+                --timeout=600 > "$R/cache-truncation.log" 2>&1
+              timeout -k 60 5400 python -m pytest -p cache_unixodbc verify IrisWorkbenchUpdate/tests -q -p no:cacheprovider -rfEs \
+                --timeout=600 --deselect "verify/test_cache_source.py::test_k5_the_cache_source_reads_a_real_intersystems_server_over_odbc" \
+                --junitxml="$R/cache-junit.xml" > "$R/cache.log" 2>&1
+              ;;
+          esac
+          echo "suites finished (output withheld from public log)"
+          exit 0
+
+      - name: Rerun failures on the base commit (output withheld)
+        working-directory: private
+        run: |
+          set +e
+          R="$RUNNER_TEMP/results"
+          git worktree add -q "$RUNNER_TEMP/base" "$BASE_REF" > /dev/null 2>&1
+          [ -f /tmp/wb-live.env ] && . /tmp/wb-live.env
+          [ -f /tmp/wb-cache.env ] && . /tmp/wb-cache.env
+          extra=""; [ "${{ matrix.job }}" = cache ] && extra="-p cache_unixodbc"
+          for j in "$R"/*-junit.xml; do
+            [ -f "$j" ] || continue
+            name=$(basename "$j" -junit.xml)
+            python ci-live/rerun_on_main.py "$j" "$RUNNER_TEMP/base" "$R/$name-vs-main.txt" $extra --timeout=900 > /dev/null 2>&1
+          done
+          echo "comparison finished"
+          exit 0
+
+      - name: File the results as an issue in the private repository
+        if: always()
+        working-directory: private
+        env:
+          RUNNER_PAT: ${{ secrets.RUNNER_PAT }}
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+        run: python ci-live/report_issue.py "${{ matrix.job }}" "$RUNNER_TEMP/results" 2> "$RUNNER_TEMP/report-error.txt" || echo "report failed"
