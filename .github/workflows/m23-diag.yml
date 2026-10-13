@@ -1,0 +1,60 @@
+name: m23-diag
+
+# Temporary: measure one layout test on Windows for a private-repo branch. Output withheld from
+# this public log; filed as an issue in the private repository.
+on:
+  push:
+    branches: [claude/m23-diag]
+
+permissions:
+  contents: read
+
+env:
+  PRIVATE_REF: claude/m23-diag
+  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.PRIVATE_REPO }}
+          token: ${{ secrets.RUNNER_PAT }}
+          ref: ${{ env.PRIVATE_REF }}
+          path: private
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Measure (output withheld)
+        shell: pwsh
+        working-directory: private
+        run: |
+          $R = Join-Path $env:RUNNER_TEMP "m23"; New-Item -ItemType Directory -Force $R | Out-Null
+          python -m pip install pytest PyQt6 openpyxl pyodbc oracledb *> (Join-Path $R "pip.txt")
+          Copy-Item ci-live/m23_diag.py verify/test_zz_m23_diag.py
+          $env:M23_DIAG_OUT = Join-Path $R "diag.jsonl"
+          $env:QT_QPA_PLATFORM = "offscreen"
+          $env:M23_CASE = "offscreen, after test_monitor_ui"
+          python -m pytest verify/test_monitor_ui.py verify/test_zz_m23_diag.py -q -p no:cacheprovider -rfE *> (Join-Path $R "after-monitor.txt")
+          $env:M23_CASE = "offscreen, alone"
+          python -m pytest verify/test_zz_m23_diag.py -q -p no:cacheprovider *> (Join-Path $R "alone.txt")
+          python -m pytest "verify/test_monitor_ui.py::test_m23_the_connections_split_between_source_and_destination_is_kept" -q -p no:cacheprovider *> (Join-Path $R "m23-alone.txt")
+          $env:QT_QPA_PLATFORM = "windows"
+          $env:M23_CASE = "windows platform, alone"
+          python -m pytest verify/test_zz_m23_diag.py -q -p no:cacheprovider *> (Join-Path $R "windows-platform.txt")
+          "measured (output withheld)"
+          exit 0
+      - name: File the measurement in the private repository
+        if: always()
+        shell: pwsh
+        working-directory: private
+        env:
+          RUNNER_PAT: ${{ secrets.RUNNER_PAT }}
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+        run: |
+          $R = Join-Path $env:RUNNER_TEMP "m23"
+          python ci-live/post_files.py "PR #24 m23 Windows diagnostic" (Join-Path $R "diag.jsonl") (Join-Path $R "after-monitor.txt") (Join-Path $R "alone.txt") (Join-Path $R "m23-alone.txt") (Join-Path $R "windows-platform.txt") 2> $null
+          exit 0
