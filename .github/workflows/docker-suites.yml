@@ -25,7 +25,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        job: [offline, iris, cache]
+        job: [offline, runtimelink]
     steps:
       - name: Check out the private code under test
         uses: actions/checkout@v4
@@ -78,6 +78,10 @@ jobs:
                 (cd "$D" && python WORKBENCH_V2_INSTALLER.txt install --skip-tests)
                 python ci/test-runner/installed_copy_check.py "$D"; } > "$R/installed-copy.log" 2>&1
               ;;
+            runtimelink)
+              WORKBENCH_RUNTIME_REPO="$PWD/ci-live/runtime" python -m pytest verify/test_runtime_link.py -q -p no:cacheprovider -rfEs \
+                --junitxml="$R/runtimelink-junit.xml" > "$R/runtimelink.log" 2>&1
+              ;;
             iris)
               sudo -E env "PATH=$PATH" RUNTIME_REPO="$PWD/ci-live/runtime" ENV_FILE=/tmp/wb-live.env \
                 bash ci/test-runner/iris-docker-local.sh > "$R/iris-setup.log" 2>&1
@@ -112,6 +116,7 @@ jobs:
           [ -f /tmp/wb-live.env ] && . /tmp/wb-live.env
           [ -f /tmp/wb-cache.env ] && . /tmp/wb-cache.env
           extra=""; [ "${{ matrix.job }}" = cache ] && extra="-p cache_unixodbc"
+          [ "${{ matrix.job }}" = runtimelink ] && export WORKBENCH_RUNTIME_REPO="$PWD/ci-live/runtime"
           for j in "$R"/*-junit.xml; do
             [ -f "$j" ] || continue
             name=$(basename "$j" -junit.xml)
