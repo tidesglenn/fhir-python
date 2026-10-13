@@ -71,9 +71,13 @@ jobs:
           sudo chmod 644 /tmp/wb.env
           . /tmp/wb.env
           export RECOVERY_OUT="$R/probe.jsonl"
+          [ "${{ matrix.source }}" = cache ] && export RECOVERY_CACHE_NAMESPACE=HHIT
+          (while sleep 120; do echo "probe records so far: $(cat "$R/probe.jsonl" 2>/dev/null | wc -l)"; done) &
+          beat=$!
           timeout -k 60 7200 python -m pytest verify/test_zz_recovery_probe.py $plugin -q -p no:cacheprovider -rfEs \
-            --timeout=2400 > "$R/probe-pytest.txt" 2>&1
-          echo "finished (output withheld)"
+            --timeout=1800 > "$R/probe-pytest.txt" 2>&1
+          kill $beat 2>/dev/null
+          echo "finished (output withheld): $(cat "$R/probe.jsonl" 2>/dev/null | wc -l) records"
           exit 0
       - name: File the results in the private repository
         if: always()
@@ -161,6 +165,11 @@ jobs:
               timeout -k 60 7200 python -m pytest $extra verify IrisWorkbenchUpdate/tests -q -p no:cacheprovider -rfEs \
                 --timeout=600 --deselect "verify/test_cache_source.py::test_k5_the_cache_source_reads_a_real_intersystems_server_over_odbc" \
                 --junitxml="$R/cache-junit.xml" > "$R/cache.log" 2>&1
+              # The isolated workers' driver settings (ci/test-runner/sitecustomize.py) on and off.
+              for site in 1 0; do
+                WORKBENCH_CACHE_UNIXODBC=$site timeout -k 60 1800 python -m pytest $extra verify/test_isolated_export_live.py \
+                  -q -p no:cacheprovider -rfEs --timeout=600 > "$R/isolated-unixodbc-$site.log" 2>&1
+              done
               ;;
           esac
           for j in "$R"/*-junit.xml; do
