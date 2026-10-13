@@ -1,0 +1,95 @@
+name: recovery-probe
+
+# Temporary: recovery journeys (fail, restart, close and reopen, process killed) through the real
+# main window on IRIS and Caché, for one private-repo branch. Output withheld from this public log;
+# filed as issues in the private repository.
+on:
+  push:
+    branches: [claude/recovery-probe]
+
+permissions:
+  contents: read
+
+env:
+  PRIVATE_REF: claude/pr24-live-docker
+  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+  QT_QPA_PLATFORM: offscreen
+  BASE_REF: HEAD~1
+
+jobs:
+  probe:
+    name: ${{ matrix.source }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        source: [iris, cache]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.PRIVATE_REPO }}
+          token: ${{ secrets.RUNNER_PAT }}
+          ref: ${{ env.PRIVATE_REF }}
+          path: private
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Dependencies (output withheld)
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/results"
+          {
+            sudo apt-get update
+            sudo apt-get install -y curl ca-certificates libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3 unixodbc unixodbc-dev
+            curl -sSL -o /tmp/packages-microsoft-prod.deb https://packages.microsoft.com/config/ubuntu/24.04/packages-microsoft-prod.deb
+            sudo dpkg -i /tmp/packages-microsoft-prod.deb
+            sudo apt-get update
+            sudo env ACCEPT_EULA=Y apt-get install -y msodbcsql18
+            python -m pip install -r private/requirements-dev.txt pytest-timeout intersystems-irispython
+          } > "$RUNNER_TEMP/results/deps-setup.log" 2>&1
+          echo "dependencies installed"
+      - name: Servers and probe (output withheld)
+        working-directory: private
+        run: |
+          set +e
+          R="$RUNNER_TEMP/results"
+          cp ci-live/recovery_probe.py verify/test_zz_recovery_probe.py
+          if [ "${{ matrix.source }}" = iris ]; then
+            sudo -E env "PATH=$PATH" RUNTIME_REPO="$PWD/ci-live/runtime" UDX_FILE="$PWD/IrisWorkbenchUpdate/cache/UDX.int" \
+              ENV_FILE=/tmp/wb.env bash ci/test-runner/iris-docker-local.sh > "$R/iris-setup.log" 2>&1
+            plugin=""
+          else
+            sudo -E env "PATH=$PATH" ENV_FILE=/tmp/wb.env bash ci/test-runner/cache-docker-local.sh > "$R/cache-setup.log" 2>&1
+            plugin="-p cache_unixodbc"
+          fi
+          sudo chmod 644 /tmp/wb.env
+          . /tmp/wb.env
+          export RECOVERY_OUT="$R/probe.jsonl"
+          timeout -k 60 6000 python -m pytest verify/test_zz_recovery_probe.py $plugin -q -p no:cacheprovider -rfEs \
+            --timeout=2400 > "$R/probe-pytest.txt" 2>&1
+          if [ "${{ matrix.source }}" = cache ]; then
+            timeout -k 60 5400 python -m pytest $plugin verify IrisWorkbenchUpdate/tests -q -p no:cacheprovider -rfEs \
+              --timeout=600 --ignore=verify/test_zz_recovery_probe.py \
+              --deselect "verify/test_cache_source.py::test_k5_the_cache_source_reads_a_real_intersystems_server_over_odbc" \
+              --junitxml="$R/cache-junit.xml" > "$R/cache.log" 2>&1
+            git worktree add -q "$RUNNER_TEMP/base" "$BASE_REF" > /dev/null 2>&1
+            python ci-live/rerun_on_main.py "$R/cache-junit.xml" "$RUNNER_TEMP/base" "$R/cache-vs-main.txt" $plugin --timeout=600 > /dev/null 2>&1
+          fi
+          echo "finished (output withheld)"
+          exit 0
+      - name: File the results in the private repository
+        if: always()
+        working-directory: private
+        env:
+          RUNNER_PAT: ${{ secrets.RUNNER_PAT }}
+          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+        run: |
+          R="$RUNNER_TEMP/results"
+          python ci-live/post_files.py "Recovery probe: ${{ matrix.source }}" "$R/probe.jsonl" "$R/probe-pytest.txt" > /dev/null 2>&1 || echo "post failed"
+          if [ "${{ matrix.source }}" = cache ]; then
+            python ci-live/report_issue.py cache-full "$R" 2> /dev/null > /dev/null || echo "report failed"
+          fi
+          echo "filed"
