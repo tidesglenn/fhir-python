@@ -25,6 +25,8 @@ OUT.mkdir(exist_ok=True, parents=True)
 RECORDS = OUT / 'measurements.jsonl'
 SQLPW = os.environ['BENCH_SQL_PASSWORD']
 BCP = '/opt/mssql-tools18/bin/bcp'
+BCP_BATCH = os.environ.get('BENCH_BCP_BATCH', '10000')
+BCP_PACKET = os.environ.get('BENCH_BCP_PACKET', '4096')
 pyodbc.pooling = False
 
 
@@ -54,12 +56,21 @@ def source(driver='odbc'):
     c = pyodbc.connect('DRIVER={BenchSource};SERVER=127.0.0.1;PORT=1972;DATABASE=USER;UID=_SYSTEM;PWD=SYS', autocommit=True, timeout=10)
     if ENGINE == 'cache':
         c.setdecoding(pyodbc.SQL_CHAR, encoding='utf-8')
+        c.setdecoding(pyodbc.SQL_WCHAR, encoding='utf-8')
         c.setencoding(encoding='utf-8')
+    c.timeout = 90
     return c
 
 
 def target():
-    return pyodbc.connect('DRIVER={ODBC Driver 18 for SQL Server};SERVER=127.0.0.1,1433;UID=sa;PWD=' + SQLPW + ';Encrypt=yes;TrustServerCertificate=yes;DATABASE=TransferBench', timeout=10)
+    c = pyodbc.connect('DRIVER={ODBC Driver 18 for SQL Server};SERVER=127.0.0.1,1433;UID=sa;PWD=' + SQLPW + ';Encrypt=yes;TrustServerCertificate=yes;DATABASE=TransferBench', timeout=10)
+    c.timeout = 90
+    return c
+
+
+def java_args():
+    return ['java', '-Xms32m', '-Xmx' + os.environ.get('BENCH_JAVA_XMX', '256m'),
+            '-cp', 'scripts:' + os.environ['JDBC_JAR'], 'TransferExtract']
 
 
 def query(shape, lower=0, upper=N):
@@ -109,7 +120,7 @@ def create_target(table):
 
 def bcp(table, path, unicode=False):
     args = [BCP, f'TransferBench.dbo.{table}', 'in', str(path), '-S', '127.0.0.1,1433', '-U', 'sa', '-P', SQLPW,
-            '-w' if unicode else '-c', '-t', '\t', '-r', '\n', '-b', '10000', '-h', 'TABLOCK', '-u', '-e', str(OUT / 'bcp-errors.txt')]
+            '-w' if unicode else '-c', '-t', '\t', '-r', '\n', '-b', BCP_BATCH, '-a', BCP_PACKET, '-h', 'TABLOCK', '-u', '-e', str(OUT / 'bcp-errors.txt')]
     p = command(args)
     (OUT / 'bcp.log').open('ab').write(p.stdout+p.stderr)
 
@@ -130,8 +141,8 @@ def _transfer(shape, lane, batch, table, lower, upper, suffix, cleanup):
         cleanup.callback(log.close)
         producer = None
         if lane == 'jdbc-stream':
-            producer = subprocess.Popen(['java', '-cp', 'scripts:' + os.environ['JDBC_JAR'], 'TransferExtract', ENGINE, query(shape, lower, upper), '-', str(batch)], stdout=subprocess.PIPE, stderr=log)
-        proc = subprocess.Popen([BCP, f'TransferBench.dbo.{table}', 'in', '/dev/stdin', '-S', '127.0.0.1,1433', '-U', 'sa', '-P', SQLPW, '-w', '-t', '\t', '-r', '\n', '-b', '10000', '-h', 'TABLOCK', '-u'], stdin=producer.stdout if producer else subprocess.PIPE, stdout=log, stderr=log)
+            producer = subprocess.Popen(java_args() + [ENGINE, query(shape, lower, upper), '-', str(batch)], stdout=subprocess.PIPE, stderr=log)
+        proc = subprocess.Popen([BCP, f'TransferBench.dbo.{table}', 'in', '/dev/stdin', '-S', '127.0.0.1,1433', '-U', 'sa', '-P', SQLPW, '-w', '-t', '\t', '-r', '\n', '-b', BCP_BATCH, '-a', BCP_PACKET, '-h', 'TABLOCK', '-u'], stdin=producer.stdout if producer else subprocess.PIPE, stdout=log, stderr=log)
         try:
             if producer:
                 producer.stdout.close()
@@ -154,7 +165,7 @@ def _transfer(shape, lane, batch, table, lower, upper, suffix, cleanup):
         return dict(rows=fetched,elapsed_s=time.perf_counter()-t0,spool_bytes=0)
     if lane == 'jdbc-bcp':
         path = OUT / f'{table}-{suffix}.tsv'
-        command(['java', '-cp', 'scripts:' + os.environ['JDBC_JAR'], 'TransferExtract', ENGINE, query(shape, lower, upper), str(path), str(batch)])
+        command(java_args() + [ENGINE, query(shape, lower, upper), str(path), str(batch)])
         fetch_s = time.perf_counter()-t0
         size = path.stat().st_size
         t = time.perf_counter()
