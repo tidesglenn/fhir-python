@@ -15,7 +15,7 @@ jobs:
     env:
       SOURCE_ENGINE: ${{ matrix.source }}
       BENCH_ROWS: '500000'
-      BENCH_PHASE: confirm
+      BENCH_PHASE: stream
       BENCH_SQL_PASSWORD: Disposable_2026x!
       RESULT_DIR: results
     steps:
@@ -109,6 +109,7 @@ jobs:
             results/setup.log
             results/server-session.log
             results/bcp.log
+            results/stream.log
           retention-days: 7
       - name: Remove disposable servers
         if: always()

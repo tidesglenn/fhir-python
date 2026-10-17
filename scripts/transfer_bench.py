@@ -3,6 +3,7 @@ import concurrent.futures
 import contextlib
 import decimal
 import hashlib
+import io
 import json
 import multiprocessing
 import os
@@ -17,7 +18,8 @@ import pyodbc
 
 ENGINE = os.environ['SOURCE_ENGINE']
 N = int(os.environ.get('BENCH_ROWS', '100000'))
-CONFIRM = os.environ.get('BENCH_PHASE') == 'confirm'
+PHASE = os.environ.get('BENCH_PHASE', 'sweep')
+CONFIRM = PHASE != 'sweep'
 OUT = Path(os.environ.get('RESULT_DIR', 'results'))
 OUT.mkdir(exist_ok=True, parents=True)
 RECORDS = OUT / 'measurements.jsonl'
@@ -123,6 +125,33 @@ def _transfer(shape, lane, batch, table, lower, upper, suffix, cleanup):
     fetched = 0
     fetch_s = 0.0
     load_s = 0.0
+    if lane in ('odbc-stream', 'jdbc-stream'):
+        log = (OUT / 'stream.log').open('ab')
+        cleanup.callback(log.close)
+        producer = None
+        if lane == 'jdbc-stream':
+            producer = subprocess.Popen(['java', '-cp', 'scripts:' + os.environ['JDBC_JAR'], 'TransferExtract', ENGINE, query(shape, lower, upper), '-', str(batch)], stdout=subprocess.PIPE, stderr=log)
+        proc = subprocess.Popen([BCP, f'TransferBench.dbo.{table}', 'in', '/dev/stdin', '-S', '127.0.0.1,1433', '-U', 'sa', '-P', SQLPW, '-w', '-t', '\t', '-r', '\n', '-b', '10000', '-h', 'TABLOCK', '-u'], stdin=producer.stdout if producer else subprocess.PIPE, stdout=log, stderr=log)
+        try:
+            if producer:
+                producer.stdout.close()
+                if producer.wait(timeout=180) != 0: raise RuntimeError('JDBC stream producer failed')
+                fetched = upper-lower
+            else:
+                c = source(); cleanup.callback(c.close)
+                cur = c.cursor(); cur.arraysize=batch; cur.execute(query(shape, lower, upper))
+                with io.TextIOWrapper(proc.stdin, encoding='utf-16le', newline='') as pipe:
+                    while True:
+                        rows=cur.fetchmany(batch)
+                        if not rows: break
+                        fetched += len(rows)
+                        pipe.writelines('\t'.join('' if v is None else str(v) for v in row)+'\n' for row in rows)
+            if proc.wait(timeout=180) != 0: raise RuntimeError('BCP stream consumer failed')
+        finally:
+            for child in (producer,proc):
+                if child is not None and child.poll() is None:
+                    child.kill(); child.wait()
+        return dict(rows=fetched,elapsed_s=time.perf_counter()-t0,spool_bytes=0)
     if lane == 'jdbc-bcp':
         path = OUT / f'{table}-{suffix}.tsv'
         command(['java', '-cp', 'scripts:' + os.environ['JDBC_JAR'], 'TransferExtract', ENGINE, query(shape, lower, upper), str(path), str(batch)])
@@ -247,6 +276,7 @@ def main():
     lanes=[('odbc-direct',1000),('odbc-direct',10000),('odbc-direct',50000),('odbc-bcp',10000),('server-bcp',10000),('jdbc-bcp',10000)]
     if ENGINE=='iris' and not CONFIRM: lanes += [('native-direct',10000),('native-bcp',10000)]
     if CONFIRM: lanes=[('odbc-direct',10000),('odbc-bcp',10000),('server-bcp',10000),('jdbc-bcp',10000)]
+    if PHASE=='stream': lanes=[('jdbc-bcp',10000),('odbc-bcp',10000),('odbc-stream',10000),('jdbc-stream',10000)]
     jobs=[(s,l,b,r) for s in wants for l,b in lanes for r in range(3)]
     random.Random(6017).shuffle(jobs)
     for index,(shape,lane,batch,rep) in enumerate(jobs):

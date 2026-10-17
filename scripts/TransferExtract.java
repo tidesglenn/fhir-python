@@ -1,4 +1,5 @@
 import java.io.BufferedWriter;
+import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
@@ -15,7 +16,7 @@ public class TransferExtract {
         String url = (engine.equals("cache") ? "jdbc:Cache" : "jdbc:IRIS") + "://127.0.0.1:1972/USER";
         try (Connection con = DriverManager.getConnection(url, "_SYSTEM", "SYS");
              Statement st = con.createStatement(ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY);
-             BufferedWriter out = Files.newBufferedWriter(Paths.get(args[2]), StandardCharsets.UTF_16LE)) {
+             BufferedWriter out = args[2].equals("-") ? new BufferedWriter(new OutputStreamWriter(System.out, StandardCharsets.UTF_16LE)) : Files.newBufferedWriter(Paths.get(args[2]), StandardCharsets.UTF_16LE)) {
             st.setFetchSize(Integer.parseInt(args[3]));
             try (ResultSet rs = st.executeQuery(args[1])) {
                 while (rs.next()) {
