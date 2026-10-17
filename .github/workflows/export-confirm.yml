@@ -1,4 +1,5 @@
 name: export-confirm
+# Explicit decimal metadata is part of the scalar correctness gate.
 on:
   push:
     branches: [codex/export-memory-tuning-20261017]
