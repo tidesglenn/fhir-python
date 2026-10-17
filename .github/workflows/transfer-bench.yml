@@ -15,7 +15,7 @@ jobs:
     env:
       SOURCE_ENGINE: ${{ matrix.source }}
       BENCH_ROWS: '500000'
-      BENCH_PHASE: bulk-api
+      BENCH_PHASE: dotnet-api
       BENCH_SQL_PASSWORD: Disposable_2026x!
       RESULT_DIR: results
     steps:
@@ -25,6 +25,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
       - name: Install drivers
         run: |
           set -euo pipefail
@@ -43,6 +46,8 @@ jobs:
           sha256sum "$RUNNER_TEMP/sql-jdbc.jar" > results/api-versions.txt
           java -version >> results/api-versions.txt 2>&1
           javac -cp "$RUNNER_TEMP/sql-jdbc.jar" scripts/TransferExtract.java scripts/TransferBulk.java
+          dotnet --info >> results/api-versions.txt
+          dotnet publish scripts/BulkTransfer/BulkTransfer.csproj -c Release -o scripts/BulkTransfer/out >> results/setup.log 2>&1
           echo 'drivers installed'
       - name: Start disposable servers
         run: |

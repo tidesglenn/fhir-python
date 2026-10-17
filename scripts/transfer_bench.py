@@ -152,6 +152,16 @@ def _transfer(shape, lane, batch, table, lower, upper, suffix, cleanup):
                 if child is not None and child.poll() is None:
                     child.kill(); child.wait()
         return dict(rows=fetched,elapsed_s=time.perf_counter()-t0,spool_bytes=0)
+    if lane == 'dotnet-bulk':
+        metrics = OUT / f'api-{table}.time'
+        args = ['/usr/bin/time','-v','-o',str(metrics),'dotnet','scripts/BulkTransfer/out/BulkTransfer.dll',query(shape,lower,upper),'dbo.'+table,str(batch)]
+        env = dict(os.environ, DOTNET_GCHeapHardLimit='0x10000000')
+        p = subprocess.run(args, capture_output=True, timeout=180, env=env)
+        with (OUT / 'api.log').open('ab') as log:
+            log.write(p.stdout+p.stderr)
+        if p.returncode: raise RuntimeError('dotnet bulk failed: '+p.stderr.decode(errors='replace')[-2000:])
+        rss = int(next(line.split(':',1)[1].strip() for line in metrics.read_text().splitlines() if 'Maximum resident set size' in line))
+        return dict(rows=upper-lower,elapsed_s=time.perf_counter()-t0,spool_bytes=0,max_rss_kib=rss,dotnet_heap_cap_mib=256)
     if lane in ('jdbc-bulk', 'jdbc-bulk-typed'):
         sql = query(shape, lower, upper)
         if lane == 'jdbc-bulk-typed':
@@ -290,6 +300,7 @@ def main():
     if CONFIRM: lanes=[('odbc-direct',10000),('odbc-bcp',10000),('server-bcp',10000),('jdbc-bcp',10000)]
     if PHASE=='stream': lanes=[('jdbc-bcp',10000),('odbc-bcp',10000),('odbc-stream',10000),('jdbc-stream',10000)]
     if PHASE=='bulk-api': lanes=[('jdbc-bcp',10000),('jdbc-bulk',10000),('jdbc-bulk',100000),('jdbc-bulk-typed',10000)]
+    if PHASE=='dotnet-api': lanes=[('jdbc-bcp',10000),('jdbc-bulk-typed',10000),('dotnet-bulk',10000),('dotnet-bulk',100000)]
     jobs=[(s,l,b,r) for s in wants for l,b in lanes for r in range(3)]
     random.Random(6017).shuffle(jobs)
     for index,(shape,lane,batch,rep) in enumerate(jobs):
