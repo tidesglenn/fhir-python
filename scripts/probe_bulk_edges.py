@@ -87,6 +87,7 @@ def main():
         with b.target() as con:
             con.execute('CREATE TABLE dbo.BulkEdges (rid int NOT NULL, label nvarchar(1000) NULL, qty int NOT NULL, payload nvarchar(max) NULL, amount decimal(18,4) NULL)')
             con.commit()
+        errors = []
         for projection in ('typed', 'text'):
             with b.target() as con:
                 con.execute('TRUNCATE TABLE dbo.BulkEdges')
@@ -97,20 +98,23 @@ def main():
             args[-1] = 'JdbcBulkTransfer'
             try:
                 b.command(args+[b.ENGINE, query, 'BulkEdges', '1000'])
-            except subprocess.CalledProcessError as exc:
-                print('BULK_DIAGNOSTIC '+exc.stderr.decode(errors='replace'), flush=True)
-                raise
+            except Exception as exc:
+                print('BULK_DIAGNOSTIC '+projection+' '+str(exc), flush=True)
+                errors.append(projection+': '+str(exc))
+                continue
             with b.target() as con:
                 got = con.execute('SELECT rid,label,qty,payload,amount FROM dbo.BulkEdges ORDER BY rid').fetchall()
                 assert len(got) == len(ROWS) and digest(got) == wanted, repr(got)
             emit['bulk_'+projection] = True
-        emit['valid'] = True
+        emit['valid'] = not errors
+        emit['errors'] = errors
     finally:
         with b.target() as con:
             con.execute('DROP TABLE IF EXISTS dbo.BulkEdges')
             con.commit()
     b.record(emit)
     print('EDGE_RESULT '+json.dumps(emit), flush=True)
+    assert emit['valid'], 'Bulk scalar correctness gate failed'
 
 
 if __name__ == '__main__':
