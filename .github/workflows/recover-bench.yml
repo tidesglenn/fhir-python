@@ -1,0 +1,38 @@
+name: recover-bench
+on:
+  push:
+    branches: [codex/export-memory-tuning-20261017]
+    paths: [.github/workflows/recover-bench.yml]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  recover:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    strategy:
+      matrix:
+        run: [38994023814, 38994265621, 38994467331]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          repository: tidesglenn/fhir-python
+          run-id: ${{ matrix.run }}
+          pattern: measurements-*
+          path: prior
+      - run: python scripts/summarize_bench.py prior
+      - name: Preserve synthetic numerical records in readable logs
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          for path in sorted(Path('prior').rglob('measurements.jsonl')):
+              for line in path.read_text().splitlines():
+                  row=json.loads(line)
+                  assert row['engine'] in ('cache','iris')
+                  print('BENCH_RAW '+json.dumps(row))
+          PY
