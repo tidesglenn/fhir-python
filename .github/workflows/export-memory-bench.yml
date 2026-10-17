@@ -1,0 +1,26 @@
+name: export-memory-bench
+on:
+  push:
+    branches: [codex/export-memory-tuning-20261017]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  prior:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    strategy:
+      matrix:
+        run: [38994023814, 38994467331]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          repository: tidesglenn/fhir-python
+          run-id: ${{ matrix.run }}
+          pattern: measurements-*
+          path: prior
+      - run: python scripts/summarize_bench.py prior
