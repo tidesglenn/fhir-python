@@ -2,3 +2,7 @@ __pycache__/
 *.class
 results/
 prior/
+evidence/*.jsonl
+evidence/*.jsonl.gz
+evidence/tuning-summary.csv
+evidence/tuning-summary.json

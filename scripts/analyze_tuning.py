@@ -35,13 +35,20 @@ def analyze(directory):
     summaries = []
     for path in sorted(Path(directory).glob('tuning-*.jsonl')):
         groups = {}
+        active_memory = {}
         for line in path.read_text().splitlines():
             row = json.loads(line)
+            if row['kind'] == 'profile':
+                active_memory = row['actual']
             if row['kind'] == 'tuning':
+                row['_effective_memory'] = dict(active_memory)
                 key = tuple(row[k] for k in KEYS)
                 groups.setdefault(key, []).append(row)
         for key, rows in groups.items():
             result = dict(dataset=path.stem, **dict(zip(KEYS, key)))
+            memory = rows[0]['_effective_memory']
+            result.update(source_globals_mb=memory.get('globals8kb'), source_routines_mb=memory.get('routines'),
+                          source_gmheap_kib=memory.get('gmheap'), source_bbsiz_kib=memory.get('bbsiz'))
             result.update(n=len(rows), valid=sum(r.get('valid', False) for r in rows))
             eligible = len(rows) == 3 and {r['rep'] for r in rows} == {0, 1, 2} and all(r.get('valid') for r in rows)
             applicable = not (result['profile'] == 'java-heap' and not result['lane'].startswith('jdbc'))
@@ -50,9 +57,12 @@ def analyze(directory):
             result['rankable'] = eligible
             if eligible:
                 result.update(rows=rows[0]['rows'], median_rows_s=round(statistics.median(r['rows_s'] for r in rows)),
+                              sha256=rows[0]['sha256'],
                               median_s=round(statistics.median(r['elapsed_s'] for r in rows), 4),
                               min_s=round(min(r['elapsed_s'] for r in rows), 4),
                               max_s=round(max(r['elapsed_s'] for r in rows), 4),
+                              median_validation_s=round(statistics.median(r['validation_s'] for r in rows), 4),
+                              median_copy_and_hash_rows_s=round(statistics.median(r['rows']/(r['elapsed_s']+r['validation_s']) for r in rows)),
                               client_peak_mib=round(max(r['client_peak_rss_bytes'] for r in rows)/2**20, 1),
                               spool_mib=round(max(r.get('spool_bytes', 0) for r in rows)/2**20, 1))
                 for server in ('source', 'target'):
@@ -88,7 +98,7 @@ if __name__ == '__main__':
     output.with_suffix('.json').write_text(json.dumps(summaries, indent=2)+'\n')
     fields = list(dict.fromkeys(key for row in summaries for key in row))
     with output.with_suffix('.csv').open('w', newline='') as file:
-        writer = csv.DictWriter(file, fieldnames=fields)
+        writer = csv.DictWriter(file, fieldnames=fields, lineterminator='\n')
         writer.writeheader()
         writer.writerows(summaries)
     print(json.dumps({'groups': len(summaries), 'rankable': sum(r['rankable'] for r in summaries)}))

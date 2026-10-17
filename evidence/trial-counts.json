@@ -1,8 +1,14 @@
 [
   {
-    "dataset": "tuning-iris-memory",
-    "measured_transfers": 48,
-    "validated_transfers": 42,
+    "dataset": "tuning-cache-confirm",
+    "measured_transfers": 54,
+    "validated_transfers": 54,
+    "rejected_transfers": 0
+  },
+  {
+    "dataset": "tuning-cache-export",
+    "measured_transfers": 66,
+    "validated_transfers": 60,
     "rejected_transfers": 6
   },
   {
@@ -12,15 +18,21 @@
     "rejected_transfers": 6
   },
   {
+    "dataset": "tuning-iris-confirm",
+    "measured_transfers": 54,
+    "validated_transfers": 54,
+    "rejected_transfers": 0
+  },
+  {
     "dataset": "tuning-iris-export",
     "measured_transfers": 72,
     "validated_transfers": 66,
     "rejected_transfers": 6
   },
   {
-    "dataset": "tuning-cache-export",
-    "measured_transfers": 66,
-    "validated_transfers": 60,
+    "dataset": "tuning-iris-memory",
+    "measured_transfers": 48,
+    "validated_transfers": 42,
     "rejected_transfers": 6
   }
 ]
