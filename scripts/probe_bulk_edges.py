@@ -95,7 +95,11 @@ def main():
             args = b.java_args()
             args[args.index('scripts:'+os.environ['JDBC_JAR'])] += ':'+os.environ['MSSQL_JDBC_JAR']
             args[-1] = 'JdbcBulkTransfer'
-            b.command(args+[b.ENGINE, query, 'BulkEdges', '1000'])
+            try:
+                b.command(args+[b.ENGINE, query, 'BulkEdges', '1000'])
+            except subprocess.CalledProcessError as exc:
+                print('BULK_DIAGNOSTIC '+exc.stderr.decode(errors='replace'), flush=True)
+                raise
             with b.target() as con:
                 got = con.execute('SELECT rid,label,qty,payload,amount FROM dbo.BulkEdges ORDER BY rid').fetchall()
                 assert len(got) == len(ROWS) and digest(got) == wanted, repr(got)
