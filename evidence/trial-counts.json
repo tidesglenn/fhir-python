@@ -1,0 +1,26 @@
+[
+  {
+    "dataset": "tuning-iris-memory",
+    "measured_transfers": 48,
+    "validated_transfers": 42,
+    "rejected_transfers": 6
+  },
+  {
+    "dataset": "tuning-cache-memory",
+    "measured_transfers": 48,
+    "validated_transfers": 42,
+    "rejected_transfers": 6
+  },
+  {
+    "dataset": "tuning-iris-export",
+    "measured_transfers": 72,
+    "validated_transfers": 66,
+    "rejected_transfers": 6
+  },
+  {
+    "dataset": "tuning-cache-export",
+    "measured_transfers": 66,
+    "validated_transfers": 60,
+    "rejected_transfers": 6
+  }
+]
