@@ -2,6 +2,12 @@ name: export-memory-bench
 on:
   push:
     branches: [codex/export-memory-tuning-20261017]
+    paths:
+      - .github/workflows/export-memory-bench.yml
+      - scripts/transfer_bench.py
+      - scripts/tune_exports.py
+      - scripts/TransferExtract.java
+      - scripts/JdbcBulkTransfer.java
 permissions:
   contents: read
   actions: read
