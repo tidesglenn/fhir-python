@@ -231,12 +231,33 @@ def main():
         for shape in WANTED:
             first_read('baseline', shape)
         lanes = ['jdbc-bulk', 'jdbc-bcp', 'server-bcp'] if MODE == 'memory' else ['jdbc-bulk', 'jdbc-bcp', 'odbc-bcp', 'odbc-direct']
-        if MODE != 'memory' and b.ENGINE == 'iris':
+        if MODE == 'confirm':
+            lanes = ['jdbc-bulk', 'jdbc-bcp', 'odbc-bcp']
+        if MODE == 'export' and b.ENGINE == 'iris':
             lanes += ['native-bcp']
         baseline = repeats([dict(shape=s, lane=l, profile='baseline') for s in WANTED for l in lanes])
         winners = {s: best_lane(s, baseline) for s in WANTED}
         emit(dict(kind='selection', lanes=winners))
-        if MODE == 'memory':
+        if MODE == 'confirm':
+            # Repeated baseline/global pairs on one runner distinguish memory
+            # effects from the substantial cross-runner timing differences.
+            for name, values in [('globals-confirm-1', dict(BASE, globals8kb=1024)),
+                                 ('baseline-confirm-1', BASE),
+                                 ('globals-confirm-2', dict(BASE, globals8kb=1024)),
+                                 ('baseline-confirm-2', BASE)]:
+                apply_profile(name, values)
+                for shape in WANTED:
+                    first_read(name, shape)
+                repeats([dict(shape=s, lane=winners[s], profile=name) for s in WANTED])
+                emit(dict(kind='profile_end', profile=name, actual=config()))
+            # A combined setting is measured, not inferred from independent
+            # improvements in fetch, bulk-commit size and worker count.
+            apply_profile('combined-globals', dict(BASE, globals8kb=1024))
+            for shape in WANTED:
+                first_read('combined-globals', shape)
+            repeats([dict(shape=s, lane=winners[s], profile='combined', batch=10000,
+                          bcp_batch=50000, workers=workers) for s in WANTED for workers in (1, 2)])
+        elif MODE == 'memory':
             profiles = [('heap', dict(BASE, gmheap=BASE['gmheap']*2)),
                         ('globals', dict(BASE, globals8kb=1024)),
                         ('routines', dict(BASE, routines=128)),

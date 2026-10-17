@@ -2,11 +2,31 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.Statement;
+import java.io.StringReader;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import com.microsoft.sqlserver.jdbc.SQLServerBulkCopy;
 import com.microsoft.sqlserver.jdbc.SQLServerBulkCopyOptions;
 
 /** Forward-only source cursor into SQL Server's bulk protocol, without a data file. */
 public class JdbcBulkTransfer {
+    private static ResultSet scalarStreams(ResultSet rows) {
+        // The tested source drivers throw on getCharacterStream(NULL). Preserve
+        // JDBC NULL semantics explicitly for these bounded scalar fixtures.
+        return (ResultSet) Proxy.newProxyInstance(JdbcBulkTransfer.class.getClassLoader(),
+            new Class<?>[] {ResultSet.class}, (proxy, method, args) -> {
+                if (method.getName().equals("getCharacterStream") || method.getName().equals("getNCharacterStream")) {
+                    String value = args[0] instanceof Integer ? rows.getString((Integer) args[0]) : rows.getString((String) args[0]);
+                    return value == null ? null : new StringReader(value);
+                }
+                try {
+                    return method.invoke(rows, args);
+                } catch (InvocationTargetException ex) {
+                    throw ex.getCause();
+                }
+            });
+    }
+
     public static void main(String[] args) throws Exception {
         String engine = args[0];
         Class.forName(engine.equals("cache") ? "com.intersys.jdbc.CacheDriver" : "com.intersystems.jdbc.IRISDriver");
@@ -29,7 +49,7 @@ public class JdbcBulkTransfer {
             bulk.setDestinationTableName("dbo." + args[2]);
             for (int i = 1; i <= 5; i++) bulk.addColumnMapping(i, i);
             try (ResultSet rows = st.executeQuery(args[1])) {
-                bulk.writeToServer(rows);
+                bulk.writeToServer(scalarStreams(rows));
             }
         }
     }
