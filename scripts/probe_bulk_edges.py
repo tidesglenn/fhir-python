@@ -79,7 +79,8 @@ def main():
         subprocess.run([sys.executable, __file__, '--source-worker'], check=True, capture_output=True, timeout=30)
     emit = dict(kind='correctness', engine=b.ENGINE, source_connections=25, isolated_source_workers=4,
                 rows=len(ROWS), typed_decimals=True, projected_decimals=True, null_and_empty_distinct=True,
-                Unicode=True, delimiter_text=True, precision_scale='18,4', sha256=wanted)
+                Unicode=True, delimiter_text=True, precision_scale='18,4',
+                bulk_decimal_metadata='explicit DECIMAL(18,4)', sha256=wanted)
     admin = pyodbc.connect('DRIVER={ODBC Driver 18 for SQL Server};SERVER=127.0.0.1,1433;UID=sa;PWD='+b.SQLPW+';Encrypt=yes;TrustServerCertificate=yes', autocommit=True)
     admin.execute('CREATE DATABASE TransferBench')
     admin.close()
@@ -92,7 +93,10 @@ def main():
             with b.target() as con:
                 con.execute('TRUNCATE TABLE dbo.BulkEdges')
                 con.commit()
-            query = QUERY if projection == 'typed' else QUERY.replace('Payload,Amount', 'Payload,CAST(Amount AS VARCHAR(40)) AS Amount')
+            # Supply the actual precision explicitly. The raw source property
+            # metadata can advertise less precision than its stored values.
+            expression = 'CAST(Amount AS DECIMAL(18,4))' if projection == 'typed' else 'CAST(Amount AS VARCHAR(40))'
+            query = QUERY.replace('Payload,Amount', 'Payload,'+expression+' AS Amount')
             args = b.java_args()
             args[args.index('scripts:'+os.environ['JDBC_JAR'])] += ':'+os.environ['MSSQL_JDBC_JAR']
             args[-1] = 'JdbcBulkTransfer'
