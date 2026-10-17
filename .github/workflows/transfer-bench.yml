@@ -15,7 +15,7 @@ jobs:
     env:
       SOURCE_ENGINE: ${{ matrix.source }}
       BENCH_ROWS: '500000'
-      BENCH_PHASE: stream
+      BENCH_PHASE: bulk-api
       BENCH_SQL_PASSWORD: Disposable_2026x!
       RESULT_DIR: results
     steps:
@@ -38,7 +38,11 @@ jobs:
             sudo env ACCEPT_EULA=Y apt-get install -y msodbcsql18 mssql-tools18
             python -m pip install pyodbc intersystems-irispython
           } > results/setup.log 2>&1
-          javac scripts/TransferExtract.java
+          curl -fsSL https://repo.maven.apache.org/maven2/com/microsoft/sqlserver/mssql-jdbc/12.10.1.jre11/mssql-jdbc-12.10.1.jre11.jar -o "$RUNNER_TEMP/sql-jdbc.jar"
+          echo "SQL_JDBC_JAR=$RUNNER_TEMP/sql-jdbc.jar" >> "$GITHUB_ENV"
+          sha256sum "$RUNNER_TEMP/sql-jdbc.jar" > results/api-versions.txt
+          java -version >> results/api-versions.txt 2>&1
+          javac -cp "$RUNNER_TEMP/sql-jdbc.jar" scripts/TransferExtract.java scripts/TransferBulk.java
           echo 'drivers installed'
       - name: Start disposable servers
         run: |
@@ -94,7 +98,7 @@ jobs:
           rows=[json.loads(x) for x in Path('results/measurements.jsonl').read_text().splitlines()]
           measured=[x for x in rows if x['kind']!='environment']
           print('measurements:',len(measured),'validated:',sum(x.get('valid',False) for x in measured))
-          assert any(x['kind']=='transfer' and x.get('valid') for x in measured)
+          assert len(measured)==24 and all(x.get('valid') for x in measured), 'Every API comparison must validate'
           PY
       - name: Save synthetic measurements
         if: always()
@@ -110,6 +114,9 @@ jobs:
             results/server-session.log
             results/bcp.log
             results/stream.log
+            results/api.log
+            results/api-versions.txt
+            results/*.time
           retention-days: 7
       - name: Remove disposable servers
         if: always()
