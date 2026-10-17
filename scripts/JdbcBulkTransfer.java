@@ -13,9 +13,10 @@ public class JdbcBulkTransfer {
         String url = (engine.equals("cache") ? "jdbc:Cache" : "jdbc:IRIS") + "://127.0.0.1:1972/USER";
         String target = "jdbc:sqlserver://127.0.0.1:1433;databaseName=TransferBench;encrypt=true;trustServerCertificate=true";
         try (Connection source = DriverManager.getConnection(url, "_SYSTEM", "SYS");
-             Connection dest = DriverManager.getConnection(target, "sa", System.getenv("BENCH_SQL_PASSWORD"));
              Statement st = source.createStatement(ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY);
-             SQLServerBulkCopy bulk = new SQLServerBulkCopy(dest)) {
+             // Per-batch internal transactions require bulk copy to own its
+             // destination connection. The Connection constructor forbids them.
+             SQLServerBulkCopy bulk = new SQLServerBulkCopy(target + ";user=sa;password=" + System.getenv("BENCH_SQL_PASSWORD"))) {
             st.setFetchSize(Integer.parseInt(args[3]));
             st.setQueryTimeout(90);
             SQLServerBulkCopyOptions options = new SQLServerBulkCopyOptions();

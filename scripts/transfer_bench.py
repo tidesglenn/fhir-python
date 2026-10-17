@@ -38,7 +38,10 @@ def record(item):
 
 
 def command(args, **kwargs):
-    return subprocess.run(args, check=True, capture_output=True, timeout=180, **kwargs)
+    try:
+        return subprocess.run(args, check=True, capture_output=True, timeout=180, **kwargs)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError('Subprocess failed: ' + exc.stderr.decode(errors='replace')[-6000:]) from None
 
 
 def session(code):
