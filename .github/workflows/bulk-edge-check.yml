@@ -1,0 +1,114 @@
+name: bulk-edge-check
+on:
+  push:
+    branches: [codex/export-memory-tuning-20261017]
+    paths:
+      - .github/workflows/bulk-edge-check.yml
+      - scripts/probe_bulk_edges.py
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        source: [cache, iris]
+        mode: [edges]
+    env:
+      SOURCE_ENGINE: ${{ matrix.source }}
+      TUNING_MODE: ${{ matrix.mode }}
+      BENCH_ROWS: '6'
+      BENCH_SQL_PASSWORD: Disposable_2026x!
+      RESULT_DIR: results
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install disposable test drivers
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          {
+            sudo apt-get update
+            sudo apt-get install -y unixodbc unixodbc-dev default-jdk-headless
+            curl -fsSL https://packages.microsoft.com/config/ubuntu/24.04/packages-microsoft-prod.deb -o /tmp/ms.deb
+            sudo dpkg -i /tmp/ms.deb
+            sudo apt-get update
+            sudo env ACCEPT_EULA=Y apt-get install -y msodbcsql18 mssql-tools18
+            python -m pip install pyodbc==5.3.0 intersystems-irispython psutil
+            curl -fsSL https://repo.maven.apache.org/maven2/com/microsoft/sqlserver/mssql-jdbc/12.8.1.jre11/mssql-jdbc-12.8.1.jre11.jar -o "$RUNNER_TEMP/mssql-jdbc.jar"
+            javac -cp "$RUNNER_TEMP/mssql-jdbc.jar" scripts/TransferExtract.java scripts/JdbcBulkTransfer.java
+            echo "MSSQL_JDBC_JAR=$RUNNER_TEMP/mssql-jdbc.jar" >> "$GITHUB_ENV"
+          } > results/setup.log 2>&1
+      - name: Start bounded disposable databases
+        run: |
+          set -euo pipefail
+          {
+            docker run -d --name target --label synthetic-export-bench=1 --cpus=2 --memory=3g -p 127.0.0.1:1433:1433 -e ACCEPT_EULA=Y -e MSSQL_PID=Developer -e MSSQL_MEMORY_LIMIT_MB=1536 -e MSSQL_SA_PASSWORD="$BENCH_SQL_PASSWORD" mcr.microsoft.com/mssql/server:2022-latest
+            if [ "$SOURCE_ENGINE" = cache ]; then
+              image=daimor/intersystems-cache:2018.1
+            else
+              image=containers.intersystems.com/intersystems/iris-community:2026.2
+            fi
+            docker run -d --name source --label synthetic-export-bench=1 --cpus=2 --memory=3g --shm-size=1g -p 127.0.0.1:1972:1972 "$image"
+            ready=0
+            for i in $(seq 1 90); do
+              if [ "$SOURCE_ENGINE" = cache ]; then
+                if printf 'write "READY",!\nhalt\n' | docker exec -i source csession cache -U USER | grep -q READY; then ready=1; break; fi
+              else
+                if docker exec source iris session iris -U%SYS '##class(Security.Users).UnExpireUserPasswords("*")'; then ready=1; break; fi
+              fi
+              sleep 2
+            done
+            [ "$ready" = 1 ]
+            mkdir -p "$RUNNER_TEMP/source-driver"
+            if [ "$SOURCE_ENGINE" = cache ]; then
+              docker cp source:/usr/cachesys/bin/libcacheodbcur6435.so "$RUNNER_TEMP/source-driver/driver.so"
+              jar=/usr/cachesys/dev/java/lib/JDK18/cache-jdbc-2.0.0.jar
+            else
+              docker cp source:/usr/irissys/bin/libirisodbcuw35.so "$RUNNER_TEMP/source-driver/driver.so"
+              jar=$(docker exec source find /usr/irissys/dev/java -iname '*jdbc*.jar' | sort | head -1)
+            fi
+            [ -n "$jar" ]
+            docker cp "source:$jar" "$RUNNER_TEMP/source-driver/jdbc.jar"
+            echo "JDBC_JAR=$RUNNER_TEMP/source-driver/jdbc.jar" >> "$GITHUB_ENV"
+            printf '[BenchSource]\nDriver=%s/source-driver/driver.so\n' "$RUNNER_TEMP" | sudo tee -a /etc/odbcinst.ini
+            ready=0
+            for i in $(seq 1 90); do
+              if /opt/mssql-tools18/bin/sqlcmd -S 127.0.0.1 -U sa -P "$BENCH_SQL_PASSWORD" -C -b -Q 'SELECT 1'; then ready=1; break; fi
+              sleep 2
+            done
+            [ "$ready" = 1 ]
+            docker inspect source target --format '{{.Name}} {{.Image}} {{.HostConfig.Memory}} {{.HostConfig.NanoCpus}}' > results/images.txt
+            uname -a > results/host.txt
+            lscpu >> results/host.txt
+            free -m >> results/host.txt
+            java -version >> results/host.txt 2>&1
+            python -m pip freeze >> results/host.txt
+          } > results/servers.log 2>&1
+      - name: Measure with complete value validation
+        run: |
+          set -euo pipefail
+          timeout -k 15 1800 python -u scripts/probe_bulk_edges.py 2>&1 | tee results/run.log
+      - name: Print synthetic summary
+        if: always()
+        run: python scripts/summarize_bench.py results
+      - name: Preserve measurements and effective settings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tuning-${{ matrix.source }}-${{ matrix.mode }}
+          path: |
+            results/*.jsonl
+            results/*.log
+            results/images.txt
+            results/host.txt
+          retention-days: 30
+      - name: Remove disposable databases
+        if: always()
+        run: docker rm -f source target >/dev/null 2>&1 || true
