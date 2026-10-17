@@ -1,5 +1,6 @@
 """Synthetic disposable-database transfer benchmark; no application dependencies."""
 import concurrent.futures
+import contextlib
 import decimal
 import hashlib
 import json
@@ -58,7 +59,7 @@ def target():
 
 
 def query(shape, lower=0, upper=N):
-    return f'SELECT ID,Label,Qty,Payload,Amount FROM Bench.{shape} WHERE ID>{lower} AND ID<={upper} ORDER BY ID'
+    return f'SELECT ID,Label,Qty,Payload,CAST(Amount AS VARCHAR(32)) AS Amount FROM Bench.{shape} WHERE ID>{lower} AND ID<={upper} ORDER BY ID'
 
 
 def canonical(row):
@@ -110,16 +111,31 @@ def bcp(table, path, unicode=False):
 
 
 def transfer(shape, lane, batch, table, lower=0, upper=N, suffix=''):
+    with contextlib.ExitStack() as cleanup:
+        return _transfer(shape, lane, batch, table, lower, upper, suffix, cleanup)
+
+
+def _transfer(shape, lane, batch, table, lower, upper, suffix, cleanup):
     driver = 'native' if lane.startswith('native') else 'odbc'
     t0 = time.perf_counter()
     fetched = 0
     fetch_s = 0.0
     load_s = 0.0
+    if lane == 'jdbc-bcp':
+        path = OUT / f'{table}-{suffix}.tsv'
+        command(['java', '-cp', 'scripts:' + os.environ['JDBC_JAR'], 'TransferExtract', ENGINE, query(shape, lower, upper), str(path), str(batch)])
+        fetch_s = time.perf_counter()-t0
+        size = path.stat().st_size
+        t = time.perf_counter()
+        bcp(table, path, unicode=True)
+        load_s = time.perf_counter()-t
+        path.unlink()
+        return dict(rows=upper-lower, elapsed_s=time.perf_counter()-t0, fetch_s=fetch_s, load_s=load_s, spool_bytes=size)
     if lane == 'server-bcp':
         # Query semantics are preserved: no direct global scan is timed.
         code = f'''set s=##class(%Stream.FileCharacter).%New(),s.Filename="/tmp/bench-{shape}.tsv",s.TranslateTable="UTF8"
 set q=##class(%SQL.Statement).%New(),sc=q.%Prepare("{query(shape, lower, upper)}")
-set r=q.%Execute() while r.%Next() {{ do s.WriteLine(r.%Get(1)_$char(9)_r.%Get(2)_$char(9)_r.%Get(3)_$char(9)_r.%Get(4)_$char(9)_r.%Get(5)) }}
+set r=q.%Execute() while r.%Next() {{ do s.WriteLine(r.%Get("ID")_$char(9)_r.%Get("Label")_$char(9)_r.%Get("Qty")_$char(9)_r.%Get("Payload")_$char(9)_r.%Get("Amount")) }}
 do s.%Save() write "EXPORT DONE",!
 '''
         session(code)
@@ -133,16 +149,19 @@ do s.%Save() write "EXPORT DONE",!
         path.unlink()
         return dict(rows=upper-lower, elapsed_s=time.perf_counter()-t0, fetch_s=fetch_s, load_s=load_s, spool_bytes=size)
     c = source(driver)
+    cleanup.callback(c.close)
     cur = c.cursor()
     cur.arraysize = batch
     cur.execute(query(shape, lower, upper))
     dest = target() if lane.endswith('direct') else None
+    if dest: cleanup.callback(dest.close)
     dc = dest.cursor() if dest else None
     if dc:
         dc.fast_executemany = True
         dc.setinputsizes([(pyodbc.SQL_INTEGER,0,0),(pyodbc.SQL_WVARCHAR,100,0),(pyodbc.SQL_INTEGER,0,0),(pyodbc.SQL_WVARCHAR,2000,0),(pyodbc.SQL_DECIMAL,14,2)])
     path = OUT / f'{table}-{suffix}.tsv'
     f = path.open('w', encoding='utf-16le', newline='') if lane.endswith('bcp') else None
+    if f: cleanup.callback(f.close)
     while True:
         t = time.perf_counter()
         rows = cur.fetchmany(batch)
@@ -151,14 +170,13 @@ do s.%Save() write "EXPORT DONE",!
         fetched += len(rows)
         if dc:
             t = time.perf_counter()
-            dc.executemany(f'INSERT INTO dbo.[{table}] VALUES (?,?,?,?,?)', [tuple(row) for row in rows])
+            dc.executemany(f'INSERT INTO dbo.[{table}] VALUES (?,?,?,?,?)', [tuple(row[:4]) + (decimal.Decimal(str(row[4])),) for row in rows])
             dest.commit()
             load_s += time.perf_counter()-t
         elif f:
             f.writelines('\t'.join('' if v is None else str(v) for v in row)+'\n' for row in rows)
     cur.close()
-    c.close()
-    if dest: dest.close()
+    # Connections and files close through the cleanup stack on success or failure.
     size = 0
     if f:
         f.close()
@@ -206,6 +224,7 @@ def main():
         for driver in (['odbc','native'] if ENGINE == 'iris' else ['odbc']):
             for batch in [1000,10000,50000]:
                 for rep in range(3):
+                    c = None
                     try:
                         c = source(driver); cur = c.cursor(); cur.arraysize=batch
                         t=time.perf_counter(); cur.execute(query(shape)); count=0; chunks=[]
@@ -215,13 +234,15 @@ def main():
                             if not rows: break
                             count+=len(rows); chunks.append(rows)
                         elapsed=time.perf_counter()-t
-                        c.close(); h=hashlib.sha256()
+                        h=hashlib.sha256()
                         for rows in chunks: digest_rows(rows,h)
                         assert count==N and h.hexdigest()==wants[shape], 'source content mismatch'
                         record(dict(kind='read',shape=shape,driver=driver,batch=batch,rep=rep,rows=count,elapsed_s=elapsed,rows_s=count/elapsed,valid=True))
                     except Exception as e:
                         record(dict(kind='read',shape=shape,driver=driver,batch=batch,rep=rep,valid=False,error=str(e)))
-    lanes=[('odbc-direct',1000),('odbc-direct',10000),('odbc-direct',50000),('odbc-bcp',10000),('server-bcp',10000)]
+                    finally:
+                        if c is not None: c.close()
+    lanes=[('odbc-direct',1000),('odbc-direct',10000),('odbc-direct',50000),('odbc-bcp',10000),('server-bcp',10000),('jdbc-bcp',10000)]
     if ENGINE=='iris': lanes += [('native-direct',10000),('native-bcp',10000)]
     jobs=[(s,l,b,r) for s in wants for l,b in lanes for r in range(3)]
     random.Random(6017).shuffle(jobs)

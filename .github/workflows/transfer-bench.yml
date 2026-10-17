@@ -30,13 +30,14 @@ jobs:
           mkdir -p results
           {
             sudo apt-get update
-            sudo apt-get install -y unixodbc unixodbc-dev
+            sudo apt-get install -y unixodbc unixodbc-dev default-jdk-headless
             curl -fsSL https://packages.microsoft.com/config/ubuntu/24.04/packages-microsoft-prod.deb -o /tmp/ms.deb
             sudo dpkg -i /tmp/ms.deb
             sudo apt-get update
             sudo env ACCEPT_EULA=Y apt-get install -y msodbcsql18 mssql-tools18
             python -m pip install pyodbc intersystems-irispython
           } > results/setup.log 2>&1
+          javac scripts/TransferExtract.java
           echo 'drivers installed'
       - name: Start disposable servers
         run: |
@@ -64,6 +65,14 @@ jobs:
             else
               docker cp source:/usr/irissys/bin/libirisodbcuw35.so "$RUNNER_TEMP/source-driver/driver.so"
             fi
+            if [ "$SOURCE_ENGINE" = cache ]; then
+              jar=/usr/cachesys/dev/java/lib/JDK18/cache-jdbc-2.0.0.jar
+            else
+              jar=$(docker exec source find /usr/irissys/dev/java -iname '*jdbc*.jar' | sort | head -1)
+            fi
+            [ -n "$jar" ]
+            docker cp "source:$jar" "$RUNNER_TEMP/source-driver/jdbc.jar"
+            echo "JDBC_JAR=$RUNNER_TEMP/source-driver/jdbc.jar" >> "$GITHUB_ENV"
             printf '[BenchSource]\nDriver=%s/source-driver/driver.so\n' "$RUNNER_TEMP" | sudo tee -a /etc/odbcinst.ini
             ready=0
             for i in $(seq 1 90); do
