@@ -4,6 +4,7 @@ import contextlib
 import decimal
 import hashlib
 import json
+import multiprocessing
 import os
 from pathlib import Path
 import random
@@ -16,6 +17,7 @@ import pyodbc
 
 ENGINE = os.environ['SOURCE_ENGINE']
 N = int(os.environ.get('BENCH_ROWS', '100000'))
+CONFIRM = os.environ.get('BENCH_PHASE') == 'confirm'
 OUT = Path(os.environ.get('RESULT_DIR', 'results'))
 OUT.mkdir(exist_ok=True, parents=True)
 RECORDS = OUT / 'measurements.jsonl'
@@ -220,7 +222,7 @@ def main():
     bootstrap()
     wants = {shape:expected(shape) for shape in ['Narrow','Wide']}
     # Full value checks establish that a quick source read isn't just decoding blanks.
-    for shape in wants:
+    for shape in ([] if CONFIRM else wants):
         for driver in (['odbc','native'] if ENGINE == 'iris' else ['odbc']):
             for batch in [1000,10000,50000]:
                 for rep in range(3):
@@ -243,7 +245,8 @@ def main():
                     finally:
                         if c is not None: c.close()
     lanes=[('odbc-direct',1000),('odbc-direct',10000),('odbc-direct',50000),('odbc-bcp',10000),('server-bcp',10000),('jdbc-bcp',10000)]
-    if ENGINE=='iris': lanes += [('native-direct',10000),('native-bcp',10000)]
+    if ENGINE=='iris' and not CONFIRM: lanes += [('native-direct',10000),('native-bcp',10000)]
+    if CONFIRM: lanes=[('odbc-direct',10000),('odbc-bcp',10000),('server-bcp',10000),('jdbc-bcp',10000)]
     jobs=[(s,l,b,r) for s in wants for l,b in lanes for r in range(3)]
     random.Random(6017).shuffle(jobs)
     for index,(shape,lane,batch,rep) in enumerate(jobs):
@@ -272,14 +275,16 @@ def main():
                 table='Parallel'
                 try:
                     create_target(table); t=time.perf_counter()
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+                    executor = concurrent.futures.ProcessPoolExecutor if CONFIRM else concurrent.futures.ThreadPoolExecutor
+                    options = {'mp_context':multiprocessing.get_context('spawn')} if CONFIRM else {}
+                    with executor(max_workers=workers, **options) as pool:
                         futures=[pool.submit(transfer,shape,lane,batch,table,N*i//workers,N*(i+1)//workers,str(i)) for i in range(workers)]
                         outcomes=[f.result() for f in futures]
                     elapsed=time.perf_counter()-t
                     value_hash=verify(table,wants[shape])
-                    record(dict(kind='transfer',shape=shape,lane=lane,batch=batch,rep=rep,workers=workers,rows=N,elapsed_s=elapsed,rows_s=N/elapsed,valid=True,sha256=value_hash))
+                    record(dict(kind='transfer',shape=shape,lane=lane,batch=batch,rep=rep,workers=workers,worker_mode='process' if CONFIRM else 'thread',rows=N,elapsed_s=elapsed,rows_s=N/elapsed,valid=True,sha256=value_hash))
                 except Exception as e:
-                    record(dict(kind='transfer',shape=shape,lane=lane,batch=batch,rep=rep,workers=workers,valid=False,error=str(e)))
+                    record(dict(kind='transfer',shape=shape,lane=lane,batch=batch,rep=rep,workers=workers,worker_mode='process' if CONFIRM else 'thread',valid=False,error=str(e)))
                 finally:
                     c=target(); c.execute('DROP TABLE IF EXISTS dbo.Parallel'); c.commit(); c.close()
 

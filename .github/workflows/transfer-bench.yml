@@ -14,7 +14,8 @@ jobs:
         source: [cache, iris]
     env:
       SOURCE_ENGINE: ${{ matrix.source }}
-      BENCH_ROWS: '100000'
+      BENCH_ROWS: '500000'
+      BENCH_PHASE: confirm
       BENCH_SQL_PASSWORD: Disposable_2026x!
       RESULT_DIR: results
     steps:
