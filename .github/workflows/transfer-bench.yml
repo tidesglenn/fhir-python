@@ -1,0 +1,105 @@
+name: transfer-bench
+on:
+  push:
+    branches: [codex/transfer-bench-20261017]
+permissions:
+  contents: read
+jobs:
+  measure:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        source: [cache, iris]
+    env:
+      SOURCE_ENGINE: ${{ matrix.source }}
+      BENCH_ROWS: '100000'
+      BENCH_SQL_PASSWORD: Disposable_2026x!
+      RESULT_DIR: results
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install drivers
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          {
+            sudo apt-get update
+            sudo apt-get install -y unixodbc unixodbc-dev
+            curl -fsSL https://packages.microsoft.com/config/ubuntu/24.04/packages-microsoft-prod.deb -o /tmp/ms.deb
+            sudo dpkg -i /tmp/ms.deb
+            sudo apt-get update
+            sudo env ACCEPT_EULA=Y apt-get install -y msodbcsql18 mssql-tools18
+            python -m pip install pyodbc intersystems-irispython
+          } > results/setup.log 2>&1
+          echo 'drivers installed'
+      - name: Start disposable servers
+        run: |
+          set -euo pipefail
+          {
+            docker run -d --name target -p 127.0.0.1:1433:1433 -e ACCEPT_EULA=Y -e MSSQL_PID=Developer -e MSSQL_SA_PASSWORD="$BENCH_SQL_PASSWORD" mcr.microsoft.com/mssql/server:2022-latest
+            if [ "$SOURCE_ENGINE" = cache ]; then
+              docker run -d --name source -p 127.0.0.1:1972:1972 daimor/intersystems-cache:2018.1
+            else
+              docker run -d --name source -p 127.0.0.1:1972:1972 containers.intersystems.com/intersystems/iris-community:2026.2
+            fi
+            ready=0
+            for i in $(seq 1 90); do
+              if [ "$SOURCE_ENGINE" = cache ]; then
+                if printf 'write "READY",!\nhalt\n' | docker exec -i source csession cache -U USER | grep -q READY; then ready=1; break; fi
+              else
+                if docker exec source iris session iris -U%SYS '##class(Security.Users).UnExpireUserPasswords("*")'; then ready=1; break; fi
+              fi
+              sleep 2
+            done
+            [ "$ready" = 1 ]
+            mkdir -p "$RUNNER_TEMP/source-driver"
+            if [ "$SOURCE_ENGINE" = cache ]; then
+              docker cp source:/usr/cachesys/bin/libcacheodbcur6435.so "$RUNNER_TEMP/source-driver/driver.so"
+            else
+              docker cp source:/usr/irissys/bin/libirisodbcuw35.so "$RUNNER_TEMP/source-driver/driver.so"
+            fi
+            printf '[BenchSource]\nDriver=%s/source-driver/driver.so\n' "$RUNNER_TEMP" | sudo tee -a /etc/odbcinst.ini
+            ready=0
+            for i in $(seq 1 90); do
+              if /opt/mssql-tools18/bin/sqlcmd -S 127.0.0.1 -U sa -P "$BENCH_SQL_PASSWORD" -C -b -Q 'SELECT 1'; then ready=1; break; fi
+              sleep 2
+            done
+            [ "$ready" = 1 ]
+            docker inspect source target --format '{{.Name}} {{.Image}}' > results/images.txt
+          } > results/servers.log 2>&1
+          echo 'servers ready'
+      - name: Measure and validate
+        run: |
+          set -euo pipefail
+          timeout -k 15 1800 python scripts/transfer_bench.py > results/run.log 2>&1
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          rows=[json.loads(x) for x in Path('results/measurements.jsonl').read_text().splitlines()]
+          measured=[x for x in rows if x['kind']!='environment']
+          print('measurements:',len(measured),'validated:',sum(x.get('valid',False) for x in measured))
+          assert any(x['kind']=='transfer' and x.get('valid') for x in measured)
+          PY
+      - name: Save synthetic measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: measurements-${{ matrix.source }}
+          path: |
+            results/measurements.jsonl
+            results/images.txt
+            results/run.log
+            results/servers.log
+            results/setup.log
+            results/server-session.log
+            results/bcp.log
+          retention-days: 7
+      - name: Remove disposable servers
+        if: always()
+        run: docker rm -f source target > /dev/null 2>&1 || true
